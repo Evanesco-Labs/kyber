@@ -37,11 +37,13 @@ func Encrypt(group kyber.Group, public kyber.Point, message []byte, hash func() 
 	// HKDF-derived key for AES-GCM, the nonce for AES-GCM can be an arbitrary
 	// (even static) value. We derive it here simply via HKDF as well.)
 	len := 32 + 12
-	buf, err := deriveKey(hash, dh, len)
+	buf, err := deriveKey(hash, dh, R, len)
+
 	if err != nil {
 		return nil, err
 	}
 	key := buf[:32]
+
 	nonce := buf[32:len]
 
 	// Encrypt message using AES-GCM
@@ -60,6 +62,10 @@ func Encrypt(group kyber.Group, public kyber.Point, message []byte, hash func() 
 	_, err = R.MarshalTo(&ctx)
 	if err != nil {
 		return nil, err
+	}
+	_, err = ctx.Write(nonce)
+	if err != nil {
+		return nil, errors.New("write nonce error")
 	}
 	_, err = ctx.Write(c)
 	if err != nil {
@@ -89,12 +95,12 @@ func Decrypt(group kyber.Group, private kyber.Scalar, ctx []byte, hash func() ha
 	// Compute shared DH key and derive the symmetric key and nonce via HKDF
 	dh := group.Point().Mul(private, R)
 	len := 32 + 12
-	buf, err := deriveKey(hash, dh, len)
+	buf, err := deriveKey(hash, dh, R, len)
 	if err != nil {
 		return nil, err
 	}
+
 	key := buf[:32]
-	nonce := buf[32:len]
 
 	// Decrypt message using AES-GCM
 	aes, err := aes.NewCipher(key)
@@ -105,15 +111,26 @@ func Decrypt(group kyber.Group, private kyber.Scalar, ctx []byte, hash func() ha
 	if err != nil {
 		return nil, err
 	}
-	return aesgcm.Open(nil, nonce, ctx[l:], nil)
+	nonce := ctx[l : l+12]
+	return aesgcm.Open(nil, nonce, ctx[l+12:], nil)
 }
 
-func deriveKey(hash func() hash.Hash, dh kyber.Point, len int) ([]byte, error) {
+func deriveKey(hash func() hash.Hash, dh kyber.Point, emphemeralpPk kyber.Point, len int) ([]byte, error) {
+
 	dhb, err := dh.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
-	hkdf := hkdf.New(hash, dhb, nil, nil)
+
+	emphemeralPkBytes, err := emphemeralpPk.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	secret := append(emphemeralPkBytes, dhb...)
+
+	info := []byte("ecies-ed25519")
+	hkdf := hkdf.New(hash, secret, nil, info)
 	key := make([]byte, len, len)
 	n, err := hkdf.Read(key)
 	if err != nil {
